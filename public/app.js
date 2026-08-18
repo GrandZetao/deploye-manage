@@ -5,19 +5,26 @@ const state = {
   currentServerId: null,
   releases: [],
   activeReleaseId: null,
-  projectDialogMode: 'create'
+  projectDialogMode: 'create',
+  fileScope: 'site',
+  filePath: '',
+  logLive: true,
+  logTimer: null,
+  logController: null
 };
 
 const el = Object.fromEntries([
   'projectList', 'emptyState', 'projectView', 'projectName', 'projectPath', 'projectStatus',
   'projectTarget', 'targetSummary', 'activeVersion', 'releaseCount', 'releaseSize', 'timeline', 'cleanupBtn',
-  'syncRemoteBtn',
+  'syncRemoteBtn', 'remoteOpsBar', 'nginxStateCopy', 'remoteSessionChip',
+  'nginxPanelBtn', 'healthCheckBtn', 'rollbackBtn', 'diagnosticsBtn', 'fileBrowserBtn', 'logsBtn',
   'deployDialog', 'deployForm', 'deployError', 'deploySubmitBtn', 'deployTargetCopy',
   'deployCredentialField', 'deployCredentialLabel', 'deployProgress', 'deployStage', 'deployPercent',
   'deployProgressBar', 'deployDetail',
   'projectDialog', 'projectForm', 'projectDialogTitle', 'projectSubmitBtn', 'projectError',
   'projectTargetType', 'projectServerField', 'projectServerSelect', 'linuxLayoutField', 'linuxLayoutSelect',
-  'releaseRootField', 'projectRootLabel', 'projectRootHint',
+  'releaseRootField', 'projectRootLabel', 'projectRootHint', 'linuxOpsFields',
+  'nginxControlMode', 'nginxServiceField',
   'pathMigrationHint', 'deleteProjectBtn', 'deleteProjectDialog', 'deleteProjectForm',
   'deleteProjectName', 'deleteProjectSubmitBtn', 'deleteProjectError', 'deleteProjectCredentialField',
   'deleteProjectCredentialLabel', 'cleanupDialog', 'cleanupForm', 'cleanupSubmitBtn', 'cleanupError',
@@ -27,7 +34,14 @@ const el = Object.fromEntries([
   'serverDialog', 'serverList', 'serverForm', 'serverAuthType', 'privateKeyField', 'serverCredentialLabel',
   'serverFingerprint', 'serverSessionStatus', 'serverTestResult', 'serverSubmitBtn', 'serverError',
   'deleteServerBtn', 'disconnectServerBtn',
-  'operationsDialog', 'operationList', 'toastRegion'
+  'operationsDialog', 'operationList',
+  'nginxDialog', 'nginxTargetCopy', 'nginxOutput', 'nginxValidateBtn', 'nginxReloadBtn', 'nginxRestartBtn',
+  'diagnosticsDialog', 'diagnosticsOutput',
+  'fileBrowserDialog', 'fileScopeSelect', 'fileBrowserPath', 'fileList', 'filePreviewName',
+  'filePreviewMeta', 'filePreviewContent', 'fileBrowserError', 'fileUpBtn', 'fileRefreshBtn',
+  'logsDialog', 'logSourceSelect', 'logQueryInput', 'logLinesSelect', 'logsLiveBtn', 'logsRefreshBtn',
+  'logsStatus', 'logsPath', 'logStream', 'logsError',
+  'toastRegion'
 ].map(id => [id, document.getElementById(id)]));
 
 async function api(url, options = {}) {
@@ -172,6 +186,18 @@ async function selectProject(projectId) {
     ? isLegacyLayout(project) ? project.rootPath : `${project.rootPath}/current`
     : `${project.rootPath}\\current`;
   el.syncRemoteBtn.hidden = !isRemoteProject(project);
+  el.remoteOpsBar.hidden = !isRemoteProject(project);
+  if (isRemoteProject(project)) {
+    const server = serverForProject(project);
+    el.remoteSessionChip.textContent = server?.sessionReady ? 'SSH已连接' : 'SSH未连接';
+    el.remoteSessionChip.classList.toggle('is-connected', Boolean(server?.sessionReady));
+    el.nginxStateCopy.textContent = project.nginxExecutablePath
+      ? (project.nginxControlMode === 'systemd' ? project.nginxServiceName : project.nginxExecutablePath)
+      : 'Nginx尚未配置';
+    el.nginxPanelBtn.disabled = !project.nginxExecutablePath;
+    el.healthCheckBtn.disabled = !project.healthCheckUrl;
+    el.rollbackBtn.disabled = !project.rollbackRelease;
+  }
   el.projectTarget.textContent = projectTargetText(project);
   el.projectTarget.classList.toggle('is-local', !isRemoteProject(project));
 
@@ -300,14 +326,15 @@ async function activateRelease(releaseId) {
   try {
     const body = {};
     if (server && !server.sessionReady) body[server.authType === 'password' ? 'password' : 'passphrase'] = confirmedCredential;
-    await api(`/api/projects/${state.currentProjectId}/releases/${releaseId}/activate`, {
+    const result = await api('/api/projects/' + state.currentProjectId + '/releases/' + releaseId + '/activate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-    await selectProject(state.currentProjectId);
     await loadProjects();
-    showToast('线上版本已切换');
+    await selectProject(state.currentProjectId);
+    const suffix = result.health?.configured ? '；' + healthResultText(result.health) : '';
+    showToast('线上版本已切换' + suffix, result.health?.configured && !result.health.ok ? 'error' : 'success');
   } catch (error) {
     showToast(`切换失败：${remoteActionHint(error)}`, 'error');
   }
@@ -437,10 +464,11 @@ el.deployForm.addEventListener('submit', async event => {
     const finished = await waitForOperation(operation.id);
     if (finished.status === 'failed') throw new Error(finished.error || '部署失败');
     el.deployDialog.close();
+    await Promise.all([loadServers(), loadProjects()]);
     await selectProject(state.currentProjectId);
-    await loadServers();
-    await loadProjects();
-    showToast(activate ? '新版本已部署并上线' : '新版本已部署，尚未上线');
+    const health = finished.result?.health;
+    const message = activate ? '新版本已部署并上线' : '新版本已部署，尚未上线';
+    showToast(message + (health?.configured ? '；' + healthResultText(health) : ''), health?.configured && !health.ok ? 'error' : 'success');
   } catch (error) {
     el.deployError.textContent = remoteActionHint(error);
     el.deployError.hidden = false;
@@ -466,6 +494,8 @@ function syncProjectTargetFields() {
   el.projectServerField.hidden = !remote;
   el.linuxLayoutField.hidden = !remote;
   el.releaseRootField.hidden = !legacy;
+  el.linuxOpsFields.hidden = !remote;
+  el.nginxServiceField.hidden = !remote || el.nginxControlMode.value !== 'systemd';
   el.projectRootLabel.textContent = legacy
     ? 'Nginx当前站点路径（软链接）'
     : remote ? 'Linux部署目录（绝对路径）' : '服务器目录（绝对路径）';
@@ -501,6 +531,10 @@ function openProjectDialog(project = null) {
     if (project.serverId) el.projectServerSelect.value = project.serverId;
     el.linuxLayoutSelect.value = project.linuxLayout || 'managed-current';
     releaseRootInput.value = project.releaseRootPath || '';
+    for (const name of ['nginxControlMode', 'nginxExecutablePath', 'nginxConfigPath', 'nginxServiceName', 'nginxAccessLogPath', 'nginxErrorLogPath', 'healthCheckUrl', 'healthCheckHost', 'healthCheckTimeoutSeconds']) {
+      const field = el.projectForm.elements.namedItem(name);
+      if (field) field.value = project[name] ?? (name === 'healthCheckTimeoutSeconds' ? 8 : '');
+    }
   }
   syncProjectTargetFields();
   el.projectDialog.showModal();
@@ -508,6 +542,7 @@ function openProjectDialog(project = null) {
 
 el.projectTargetType.addEventListener('change', syncProjectTargetFields);
 el.linuxLayoutSelect.addEventListener('change', syncProjectTargetFields);
+el.nginxControlMode.addEventListener('change', syncProjectTargetFields);
 el.projectForm.elements.namedItem('rootPath').addEventListener('input', () => {
   const releaseInput = el.projectForm.elements.namedItem('releaseRootPath');
   if (el.linuxLayoutSelect.value === 'legacy-live-link' && !releaseInput.dataset.edited) {
@@ -539,7 +574,18 @@ el.projectForm.addEventListener('submit', async event => {
       linuxLayout: targetType === 'ssh-linux' ? el.linuxLayoutSelect.value : 'managed-current',
       releaseRootPath: targetType === 'ssh-linux' && el.linuxLayoutSelect.value === 'legacy-live-link'
         ? el.projectForm.elements.namedItem('releaseRootPath').value
-        : null
+        : null,
+      nginxControlMode: targetType === 'ssh-linux' ? el.nginxControlMode.value : 'binary',
+      nginxExecutablePath: targetType === 'ssh-linux' ? el.projectForm.elements.namedItem('nginxExecutablePath').value : null,
+      nginxConfigPath: targetType === 'ssh-linux' ? el.projectForm.elements.namedItem('nginxConfigPath').value : null,
+      nginxServiceName: targetType === 'ssh-linux' ? el.projectForm.elements.namedItem('nginxServiceName').value : null,
+      nginxAccessLogPath: targetType === 'ssh-linux' ? el.projectForm.elements.namedItem('nginxAccessLogPath').value : null,
+      nginxErrorLogPath: targetType === 'ssh-linux' ? el.projectForm.elements.namedItem('nginxErrorLogPath').value : null,
+      healthCheckUrl: targetType === 'ssh-linux' ? el.projectForm.elements.namedItem('healthCheckUrl').value : null,
+      healthCheckHost: targetType === 'ssh-linux' ? el.projectForm.elements.namedItem('healthCheckHost').value : null,
+      healthCheckTimeoutSeconds: targetType === 'ssh-linux'
+        ? Number(el.projectForm.elements.namedItem('healthCheckTimeoutSeconds').value || 8)
+        : 8
     };
     const project = await api(isEdit ? `/api/projects/${state.currentProjectId}` : '/api/projects', {
       method: isEdit ? 'PATCH' : 'POST',
@@ -850,6 +896,346 @@ async function openOperations() {
 
 document.getElementById('operationsBtn').addEventListener('click', openOperations);
 document.getElementById('operationsCloseBtn').addEventListener('click', () => el.operationsDialog.close());
+
+function confirmedRemoteBody(server) {
+  const body = {};
+  if (server && !server.sessionReady) body[server.authType === 'password' ? 'password' : 'passphrase'] = confirmedCredential;
+  return body;
+}
+
+function healthResultText(health) {
+  if (!health?.configured) return '未配置健康检查';
+  if (health.ok) return '健康检查通过 · HTTP ' + health.statusCode + ' · ' + health.durationMs + 'ms';
+  return '健康检查失败 · ' + (health.error || ('HTTP ' + health.statusCode));
+}
+
+function setNginxButtonsDisabled(disabled) {
+  for (const button of [el.nginxValidateBtn, el.nginxReloadBtn, el.nginxRestartBtn]) button.disabled = disabled;
+}
+
+el.nginxPanelBtn.addEventListener('click', () => {
+  const project = currentProject();
+  if (!project?.nginxExecutablePath) {
+    showToast('请先在项目设置中填写Nginx可执行文件路径', 'error');
+    return;
+  }
+  el.nginxTargetCopy.textContent = (project.nginxControlMode === 'systemd'
+    ? 'systemd · ' + project.nginxServiceName
+    : 'binary · ' + project.nginxExecutablePath)
+    + (project.nginxConfigPath ? ' · ' + project.nginxConfigPath : ' · 编译默认配置');
+  el.nginxOutput.textContent = '选择一个操作。reload和restart执行前都会先运行配置校验。';
+  el.nginxDialog.showModal();
+});
+
+document.getElementById('nginxCloseBtn').addEventListener('click', () => el.nginxDialog.close());
+
+async function runNginxAction(action) {
+  const project = currentProject();
+  const server = serverForProject(project);
+  if (!project || !server) return;
+  const labels = {
+    validate: ['校验Nginx配置', '开始校验', false],
+    reload: ['Reload Nginx', '确认Reload', false],
+    restart: ['Restart Nginx', '确认Restart', true]
+  };
+  const label = labels[action];
+  const confirmed = await confirmAction({
+    title: label[0],
+    message: project.nginxExecutablePath + '\n\n' + (action === 'restart'
+      ? 'Restart会等待旧master退出后启动新master，期间可能出现短暂中断。'
+      : action === 'reload' ? '配置校验通过后才会平滑加载新配置。' : '只检查配置，不改变Nginx运行状态。'),
+    confirmText: label[1],
+    danger: label[2],
+    credentialServer: server
+  });
+  if (!confirmed) return;
+  setNginxButtonsDisabled(true);
+  el.nginxOutput.textContent = '正在执行 ' + action + '…';
+  try {
+    const result = await api('/api/projects/' + project.id + '/nginx/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(confirmedRemoteBody(server))
+    });
+    const output = result.output || result.validation?.output || '操作完成';
+    el.nginxOutput.textContent = output + (result.health ? '\n\n' + healthResultText(result.health) : '');
+    await loadServers();
+    showToast(action === 'validate' ? 'Nginx配置校验通过' : 'Nginx ' + action + ' 已完成');
+  } catch (error) {
+    el.nginxOutput.textContent = remoteActionHint(error);
+    showToast(label[0] + '失败', 'error');
+  } finally {
+    setNginxButtonsDisabled(false);
+  }
+}
+
+el.nginxValidateBtn.addEventListener('click', () => runNginxAction('validate'));
+el.nginxReloadBtn.addEventListener('click', () => runNginxAction('reload'));
+el.nginxRestartBtn.addEventListener('click', () => runNginxAction('restart'));
+
+el.healthCheckBtn.addEventListener('click', async () => {
+  const project = currentProject();
+  const server = serverForProject(project);
+  if (!project?.healthCheckUrl || !server) return;
+  const confirmed = await confirmAction({
+    title: '检查站点健康状态',
+    message: project.healthCheckUrl + (project.healthCheckHost ? '\nHost: ' + project.healthCheckHost : ''),
+    confirmText: '开始检查',
+    credentialServer: server
+  });
+  if (!confirmed) return;
+  try {
+    const result = await api('/api/projects/' + project.id + '/health', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(confirmedRemoteBody(server))
+    });
+    showToast(healthResultText(result), result.ok ? 'success' : 'error');
+    await loadServers();
+  } catch (error) {
+    showToast('健康检查失败：' + remoteActionHint(error), 'error');
+  }
+});
+
+el.rollbackBtn.addEventListener('click', async () => {
+  const project = currentProject();
+  const release = project?.rollbackRelease;
+  const server = serverForProject(project);
+  if (!project || !release) return;
+  const confirmed = await confirmAction({
+    title: '回滚到上一个线上版本？',
+    message: release.folderName + '\n' + (release.description || '未填写更新说明') + '\n\n软链接会立即切换到这个版本。',
+    confirmText: '确认回滚',
+    danger: true,
+    credentialServer: isRemoteProject(project) ? server : null
+  });
+  if (!confirmed) return;
+  try {
+    const result = await api('/api/projects/' + project.id + '/rollback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(confirmedRemoteBody(server))
+    });
+    await loadProjects();
+    await selectProject(project.id);
+    const suffix = result.health?.configured ? '；' + healthResultText(result.health) : '';
+    showToast('已回滚到 ' + result.release.folderName + suffix, result.health?.configured && !result.health.ok ? 'error' : 'success');
+  } catch (error) {
+    await loadProjects();
+    await selectProject(project.id);
+    showToast('回滚失败：' + remoteActionHint(error), 'error');
+  }
+});
+
+el.diagnosticsBtn.addEventListener('click', async () => {
+  const project = currentProject();
+  const server = serverForProject(project);
+  if (!project || !server) return;
+  const confirmed = await confirmAction({
+    title: '运行远程环境诊断',
+    message: '只读取系统、磁盘、项目目录、Nginx进程和监听端口。',
+    confirmText: '开始诊断',
+    credentialServer: server
+  });
+  if (!confirmed) return;
+  el.diagnosticsOutput.textContent = '正在读取远程环境…';
+  el.diagnosticsDialog.showModal();
+  try {
+    const result = await api('/api/projects/' + project.id + '/diagnostics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(confirmedRemoteBody(server))
+    });
+    el.diagnosticsOutput.textContent = result.details || '诊断完成，没有输出。';
+    await loadServers();
+  } catch (error) {
+    el.diagnosticsOutput.textContent = remoteActionHint(error);
+  }
+});
+
+document.getElementById('diagnosticsCloseBtn').addEventListener('click', () => el.diagnosticsDialog.close());
+
+function logTime(entry) {
+  if (entry.time) return entry.time;
+  return entry.timestamp ? fmtTime(entry.timestamp) : '—';
+}
+
+function renderLogs(entries) {
+  const stickToBottom = el.logStream.scrollHeight - el.logStream.scrollTop - el.logStream.clientHeight < 56;
+  el.logStream.innerHTML = entries.length ? entries.map(entry => `
+    <article class="log-row log-level-${escapeHtml(entry.level)}">
+      <time>${escapeHtml(logTime(entry))}</time>
+      <span class="log-source">${escapeHtml(entry.source)}</span>
+      <span class="log-level">${escapeHtml(entry.level)}</span>
+      <code>${escapeHtml(entry.message)}</code>
+    </article>`).join('') : '<div class="log-empty">当前筛选条件下没有日志。</div>';
+  if (stickToBottom) el.logStream.scrollTop = el.logStream.scrollHeight;
+}
+
+/**
+ * 拉取当前日志快照，新的筛选请求会取消旧请求。
+ * * 这样快速切换来源时，较慢的SSH结果不会覆盖最新选择。
+ */
+async function loadLogs(replacePending = false) {
+  const project = currentProject();
+  if (!project || !el.logsDialog.open) return;
+  if (state.logController && !replacePending) return;
+  if (state.logController) state.logController.abort();
+  const controller = new AbortController();
+  state.logController = controller;
+  el.logsError.hidden = true;
+  el.logsStatus.textContent = '正在更新…';
+  const query = new URLSearchParams({
+    source: el.logSourceSelect.value,
+    lines: el.logLinesSelect.value,
+    query: el.logQueryInput.value.trim()
+  });
+  try {
+    const result = await api(`/api/projects/${project.id}/logs?${query}`, { signal: controller.signal });
+    if (state.logController !== controller) return;
+    renderLogs(result.entries);
+    el.logsPath.textContent = result.path || result.label;
+    el.logsStatus.textContent = `${result.entries.length} 行 · ${new Date(result.checkedAt).toLocaleTimeString()}`;
+  } catch (error) {
+    if (error.name === 'AbortError' || state.logController !== controller) return;
+    el.logsStatus.textContent = '更新失败';
+    el.logsError.textContent = remoteActionHint(error);
+    el.logsError.hidden = false;
+  } finally {
+    if (state.logController === controller) state.logController = null;
+  }
+}
+
+function stopLogPolling() {
+  clearInterval(state.logTimer);
+  state.logTimer = null;
+  if (state.logController) state.logController.abort();
+  state.logController = null;
+}
+
+function startLogPolling() {
+  clearInterval(state.logTimer);
+  //* 远程来源每次会建立短SSH连接，5秒间隔避免持续握手占用服务器资源。
+  state.logTimer = state.logLive ? setInterval(loadLogs, 5000) : null;
+}
+
+el.logsBtn.addEventListener('click', () => {
+  const project = currentProject();
+  if (!project) return;
+  for (const option of el.logSourceSelect.options) option.disabled = option.value !== 'manager' && !isRemoteProject(project);
+  el.logSourceSelect.value = 'manager';
+  el.logQueryInput.value = '';
+  state.logLive = true;
+  el.logsLiveBtn.textContent = '实时';
+  el.logsLiveBtn.classList.add('is-live');
+  el.logsLiveBtn.setAttribute('aria-pressed', 'true');
+  el.logsStatus.textContent = '正在读取…';
+  el.logsPath.textContent = '';
+  el.logStream.innerHTML = '<div class="log-empty">正在读取运行日志…</div>';
+  el.logsDialog.showModal();
+  loadLogs();
+  startLogPolling();
+});
+
+el.logSourceSelect.addEventListener('change', () => loadLogs(true));
+el.logLinesSelect.addEventListener('change', () => loadLogs(true));
+el.logsRefreshBtn.addEventListener('click', () => loadLogs(true));
+el.logsLiveBtn.addEventListener('click', () => {
+  state.logLive = !state.logLive;
+  el.logsLiveBtn.textContent = state.logLive ? '实时' : '已暂停';
+  el.logsLiveBtn.classList.toggle('is-live', state.logLive);
+  el.logsLiveBtn.setAttribute('aria-pressed', String(state.logLive));
+  if (state.logLive) loadLogs(true);
+  startLogPolling();
+});
+
+let logSearchTimer;
+el.logQueryInput.addEventListener('input', () => {
+  clearTimeout(logSearchTimer);
+  logSearchTimer = setTimeout(() => loadLogs(true), 260);
+});
+document.getElementById('logsCloseBtn').addEventListener('click', () => el.logsDialog.close());
+el.logsDialog.addEventListener('close', stopLogPolling);
+
+function browserChildPath(name) {
+  return state.filePath ? state.filePath + '/' + name : name;
+}
+
+async function loadFileBrowser() {
+  const project = currentProject();
+  if (!project) return;
+  el.fileBrowserError.hidden = true;
+  el.fileList.innerHTML = '<div class="project-list-empty"><strong>正在读取目录</strong></div>';
+  const query = new URLSearchParams({ scope: state.fileScope, path: state.filePath });
+  try {
+    const result = await api('/api/projects/' + project.id + '/files?' + query.toString());
+    state.filePath = result.path;
+    el.fileBrowserPath.textContent = '/' + state.filePath;
+    el.fileUpBtn.disabled = !state.filePath;
+    el.fileList.innerHTML = result.entries.length
+      ? result.entries.map(item => '<button type="button" class="file-item" data-name="' + escapeHtml(item.name) + '" data-type="' + item.type + '"><span class="file-kind">' + (item.type === 'directory' ? 'DIR' : item.type === 'link' ? 'LNK' : 'FILE') + '</span><strong>' + escapeHtml(item.name) + '</strong><span>' + (item.type === 'directory' ? '—' : fmtSize(item.sizeBytes)) + '</span><time>' + (item.modifiedAt ? fmtTime(item.modifiedAt) : '—') + '</time></button>').join('')
+      : '<div class="project-list-empty"><strong>目录为空</strong></div>';
+    el.fileList.querySelectorAll('.file-item').forEach(button => {
+      button.addEventListener('click', () => {
+        const nextPath = browserChildPath(button.dataset.name);
+        if (button.dataset.type === 'directory') {
+          state.filePath = nextPath;
+          loadFileBrowser();
+          return;
+        }
+        previewProjectFile(nextPath);
+      });
+    });
+  } catch (error) {
+    el.fileList.innerHTML = '';
+    el.fileBrowserError.textContent = remoteActionHint(error);
+    el.fileBrowserError.hidden = false;
+  }
+}
+
+async function previewProjectFile(relativePath) {
+  const project = currentProject();
+  const query = new URLSearchParams({ scope: state.fileScope, path: relativePath });
+  el.filePreviewName.textContent = relativePath.split('/').pop();
+  el.filePreviewMeta.textContent = '正在读取…';
+  el.filePreviewContent.textContent = '';
+  try {
+    const result = await api('/api/projects/' + project.id + '/files/content?' + query.toString());
+    el.filePreviewMeta.textContent = fmtSize(result.sizeBytes) + ' · 只读';
+    el.filePreviewContent.textContent = result.content;
+  } catch (error) {
+    el.filePreviewMeta.textContent = '无法预览';
+    el.filePreviewContent.textContent = remoteActionHint(error);
+  }
+}
+
+el.fileBrowserBtn.addEventListener('click', () => {
+  const server = serverForProject();
+  if (!server?.sessionReady) {
+    showToast('请先在SSH服务器中连接一次，再打开文件浏览器', 'error');
+    return;
+  }
+  state.fileScope = 'site';
+  state.filePath = '';
+  el.fileScopeSelect.value = state.fileScope;
+  el.filePreviewName.textContent = '选择文本文件';
+  el.filePreviewMeta.textContent = '';
+  el.filePreviewContent.textContent = '目录和版本文件保持只读，避免破坏不可变发布记录。';
+  el.fileBrowserDialog.showModal();
+  loadFileBrowser();
+});
+
+el.fileScopeSelect.addEventListener('change', () => {
+  state.fileScope = el.fileScopeSelect.value;
+  state.filePath = '';
+  loadFileBrowser();
+});
+el.fileUpBtn.addEventListener('click', () => {
+  state.filePath = state.filePath.includes('/') ? state.filePath.slice(0, state.filePath.lastIndexOf('/')) : '';
+  loadFileBrowser();
+});
+el.fileRefreshBtn.addEventListener('click', loadFileBrowser);
+document.getElementById('fileBrowserCloseBtn').addEventListener('click', () => el.fileBrowserDialog.close());
 
 el.syncRemoteBtn.addEventListener('click', async () => {
   const project = currentProject();

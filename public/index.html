@@ -47,6 +47,7 @@
         <div class="header-actions">
           <button class="btn btn-secondary" id="syncRemoteBtn" hidden>同步远程版本</button>
           <button class="btn btn-secondary" id="operationsBtn">操作记录</button>
+          <button class="btn btn-secondary" id="logsBtn">运行日志</button>
           <button class="btn btn-secondary" id="projectSettingsBtn">项目设置</button>
           <button class="btn btn-primary" id="deployBtn">部署新版本</button>
         </div>
@@ -57,6 +58,21 @@
         <div><span>版本总数</span><strong id="releaseCount">0</strong></div>
         <div><span>版本占用</span><strong id="releaseSize">0 B</strong></div>
         <div><span>发布目标</span><strong id="targetSummary">Windows 本机</strong></div>
+      </section>
+
+      <section class="ops-console" id="remoteOpsBar" hidden aria-label="Linux运维工具">
+        <div class="ops-console-copy">
+          <p class="section-kicker">Linux operations</p>
+          <strong id="nginxStateCopy">Nginx尚未配置</strong>
+          <span class="session-chip" id="remoteSessionChip">SSH未连接</span>
+        </div>
+        <div class="ops-console-actions">
+          <button class="btn btn-secondary" id="nginxPanelBtn">Nginx控制</button>
+          <button class="btn btn-secondary" id="healthCheckBtn">健康检查</button>
+          <button class="btn btn-secondary" id="rollbackBtn">一键回滚</button>
+          <button class="btn btn-secondary" id="diagnosticsBtn">远程诊断</button>
+          <button class="btn btn-secondary" id="fileBrowserBtn">文件浏览</button>
+        </div>
       </section>
 
       <div class="section-head">
@@ -112,7 +128,7 @@
   </form>
 </dialog>
 
-<dialog id="projectDialog" class="dialog">
+<dialog id="projectDialog" class="dialog dialog-wide">
   <form id="projectForm" class="dialog-form">
     <p class="dialog-kicker">Project settings</p>
     <h2 id="projectDialogTitle">新建项目</h2>
@@ -148,6 +164,46 @@
     <p class="hint" id="projectRootHint">nginx 的 root 需要指向 <code>&lt;这个目录&gt;\current</code></p>
     <p class="notice" id="pathMigrationHint" hidden>修改路径时会迁移历史版本并重建 current，根目录中的其他文件不会移动。</p>
 
+    <section class="settings-block" id="linuxOpsFields" hidden>
+      <div class="settings-block-title"><strong>Linux运维</strong><span>Nginx控制与上线验证</span></div>
+      <div class="settings-grid">
+        <label>Nginx控制方式
+          <select name="nginxControlMode" id="nginxControlMode">
+            <option value="binary">可执行文件</option>
+            <option value="systemd">systemd服务</option>
+          </select>
+        </label>
+        <label id="nginxServiceField" hidden>Nginx服务名
+          <input type="text" name="nginxServiceName" placeholder="nginx.service">
+        </label>
+      </div>
+      <label>Nginx可执行文件
+        <input type="text" name="nginxExecutablePath" placeholder="/home/nginx/nginx/sbin/nginx">
+      </label>
+      <label>Nginx配置文件（留空使用编译默认值）
+        <input type="text" name="nginxConfigPath" placeholder="/home/nginx/nginx/conf/nginx.conf">
+      </label>
+      <div class="settings-grid">
+        <label>Nginx access日志
+          <input type="text" name="nginxAccessLogPath" placeholder="/home/nginx/nginx/logs/access.log">
+        </label>
+        <label>Nginx error日志
+          <input type="text" name="nginxErrorLogPath" placeholder="/home/nginx/nginx/logs/error.log">
+        </label>
+      </div>
+      <label>健康检查地址
+        <input type="text" name="healthCheckUrl" placeholder="http://127.0.0.1/health">
+      </label>
+      <div class="settings-grid health-grid">
+        <label>Host请求头（可选）
+          <input type="text" name="healthCheckHost" placeholder="example.com">
+        </label>
+        <label>超时秒数
+          <input type="number" name="healthCheckTimeoutSeconds" min="2" max="60" value="8">
+        </label>
+      </div>
+    </section>
+
     <div class="dialog-actions">
       <button type="button" class="btn btn-ghost btn-danger project-delete-entry" id="deleteProjectBtn" hidden>删除项目</button>
       <span class="dialog-action-spacer"></span>
@@ -156,6 +212,95 @@
     </div>
     <p class="dialog-error" id="projectError" hidden></p>
   </form>
+</dialog>
+
+<dialog id="nginxDialog" class="dialog dialog-wide">
+  <div class="dialog-form">
+    <div class="dialog-title-row">
+      <div><p class="dialog-kicker">Nginx control</p><h2>Nginx控制</h2></div>
+      <button type="button" class="btn btn-ghost" id="nginxCloseBtn">关闭</button>
+    </div>
+    <p class="deploy-route-copy" id="nginxTargetCopy"></p>
+    <pre class="terminal-output" id="nginxOutput">选择一个操作。reload和restart执行前都会先运行配置校验。</pre>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-secondary" id="nginxValidateBtn">校验配置</button>
+      <button type="button" class="btn btn-primary" id="nginxReloadBtn">Reload</button>
+      <button type="button" class="btn btn-danger-solid" id="nginxRestartBtn">Restart</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="logsDialog" class="dialog dialog-logs">
+  <div class="dialog-form logs-form">
+    <div class="dialog-title-row">
+      <div><p class="dialog-kicker">Runtime stream</p><h2>运行日志</h2></div>
+      <button type="button" class="btn btn-ghost" id="logsCloseBtn">关闭</button>
+    </div>
+    <div class="logs-toolbar">
+      <label>日志来源
+        <select id="logSourceSelect">
+          <option value="manager">Deploy Manager</option>
+          <option value="nginx-access">Nginx access</option>
+          <option value="nginx-error">Nginx error</option>
+        </select>
+      </label>
+      <label class="logs-search">搜索
+        <input type="search" id="logQueryInput" placeholder="状态码、路径或错误内容">
+      </label>
+      <label>显示行数
+        <select id="logLinesSelect">
+          <option value="100">100</option>
+          <option value="200" selected>200</option>
+          <option value="500">500</option>
+          <option value="1000">1000</option>
+        </select>
+      </label>
+      <button type="button" class="btn btn-secondary logs-live is-live" id="logsLiveBtn" aria-pressed="true">实时</button>
+      <button type="button" class="btn btn-secondary" id="logsRefreshBtn">刷新</button>
+    </div>
+    <div class="logs-meta"><span id="logsStatus">等待读取</span><code id="logsPath"></code></div>
+    <div class="log-stream" id="logStream" role="log" aria-live="off">
+      <div class="log-empty">正在读取运行日志…</div>
+    </div>
+    <p class="dialog-error" id="logsError" hidden></p>
+  </div>
+</dialog>
+
+<dialog id="diagnosticsDialog" class="dialog dialog-wide">
+  <div class="dialog-form">
+    <div class="dialog-title-row">
+      <div><p class="dialog-kicker">Remote diagnostics</p><h2>远程环境诊断</h2></div>
+      <button type="button" class="btn btn-ghost" id="diagnosticsCloseBtn">关闭</button>
+    </div>
+    <pre class="terminal-output terminal-output-tall" id="diagnosticsOutput">正在读取远程环境…</pre>
+  </div>
+</dialog>
+
+<dialog id="fileBrowserDialog" class="dialog dialog-browser">
+  <div class="dialog-form browser-form">
+    <div class="dialog-title-row">
+      <div><p class="dialog-kicker">Scoped SFTP browser</p><h2>项目文件浏览</h2></div>
+      <button type="button" class="btn btn-ghost" id="fileBrowserCloseBtn">关闭</button>
+    </div>
+    <p class="notice">只读浏览。所有路径都经过服务器realpath校验，不能跳出项目线上目录或版本仓库。</p>
+    <div class="browser-toolbar">
+      <select id="fileScopeSelect" aria-label="浏览范围">
+        <option value="site">线上目录</option>
+        <option value="releases">版本仓库</option>
+      </select>
+      <button type="button" class="btn btn-secondary" id="fileUpBtn">上一级</button>
+      <code id="fileBrowserPath">/</code>
+      <button type="button" class="btn btn-secondary" id="fileRefreshBtn">刷新</button>
+    </div>
+    <div class="browser-layout">
+      <div class="file-list" id="fileList"></div>
+      <section class="file-preview">
+        <div><strong id="filePreviewName">选择文本文件</strong><span id="filePreviewMeta"></span></div>
+        <pre id="filePreviewContent">目录和版本文件保持只读，避免破坏不可变发布记录。</pre>
+      </section>
+    </div>
+    <p class="dialog-error" id="fileBrowserError" hidden></p>
+  </div>
 </dialog>
 
 <dialog id="deleteProjectDialog" class="dialog">
