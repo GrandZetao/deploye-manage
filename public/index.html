@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>发布管理 · Deploy Manager</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">&#9670;</span>
+        <div><strong>发布管理</strong><span>Deploy Manager</span></div>
+      </div>
+      <button class="btn btn-sidebar" id="newProjectBtn">新建项目</button>
+    </div>
+    <nav class="project-list" id="projectList" aria-label="项目列表"></nav>
+    <p class="sidebar-note"><span></span>仅限可信网络访问</p>
+  </aside>
+
+  <main class="main">
+    <div id="emptyState" class="empty-state">
+      <div class="empty-mark" aria-hidden="true">&#9670;</div>
+      <h1>让第一个版本上线</h1>
+      <p>创建项目后上传构建产物，后续版本可随时切换。</p>
+      <button class="btn btn-primary" id="emptyNewProjectBtn">创建项目</button>
+    </div>
+
+    <div id="projectView" class="project-view" hidden>
+      <header class="view-header">
+        <div class="project-heading">
+          <div class="title-line">
+            <h1 id="projectName"></h1>
+            <span class="status-badge" id="projectStatus">尚未上线</span>
+          </div>
+          <div class="path-line">
+            <code id="projectPath"></code>
+            <button class="icon-btn" id="copyPathBtn" title="复制线上目录" aria-label="复制线上目录">复制</button>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-secondary" id="projectSettingsBtn">项目设置</button>
+          <button class="btn btn-primary" id="deployBtn">部署新版本</button>
+        </div>
+      </header>
+
+      <section class="project-summary" aria-label="项目概览">
+        <div><span>当前线上版本</span><strong class="mono" id="activeVersion">—</strong></div>
+        <div><span>版本总数</span><strong id="releaseCount">0</strong></div>
+        <div><span>版本占用</span><strong id="releaseSize">0 B</strong></div>
+      </section>
+
+      <div class="section-head">
+        <div>
+          <p class="section-kicker">Release history</p>
+          <h2>版本记录</h2>
+        </div>
+        <button class="btn btn-ghost" id="cleanupBtn">清理旧版本</button>
+      </div>
+      <div class="timeline" id="timeline"></div>
+    </div>
+  </main>
+</div>
+
+<dialog id="deployDialog" class="dialog">
+  <form id="deployForm" class="dialog-form">
+    <p class="dialog-kicker">New release</p>
+    <h2>部署新版本</h2>
+    <p class="dialog-copy">上传静态构建产物，每次部署都会生成一个不可变版本。</p>
+
+    <label>压缩包（.zip）
+      <input type="file" name="file" accept=".zip" required>
+    </label>
+
+    <label>本次更新了什么
+      <textarea name="description" rows="3" placeholder="例如：修复登录页样式问题，新增暗黑模式"></textarea>
+    </label>
+
+    <label class="checkbox-label">
+      <input type="checkbox" name="activate" checked>
+      部署完成后立即上线
+    </label>
+
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-ghost" id="deployCancelBtn">取消</button>
+      <button type="submit" class="btn btn-primary" id="deploySubmitBtn">开始部署</button>
+    </div>
+    <p class="dialog-error" id="deployError" hidden></p>
+  </form>
+</dialog>
+
+<dialog id="projectDialog" class="dialog">
+  <form id="projectForm" class="dialog-form">
+    <p class="dialog-kicker">Project settings</p>
+    <h2 id="projectDialogTitle">新建项目</h2>
+
+    <label>项目名称
+      <input type="text" name="name" placeholder="例如：company-website" required>
+    </label>
+
+    <label>服务器目录（绝对路径）
+      <input type="text" name="rootPath" placeholder="D:\sites\company-website" required>
+    </label>
+    <p class="hint">nginx 的 root 需要指向 <code>&lt;这个目录&gt;\current</code></p>
+    <p class="notice" id="pathMigrationHint" hidden>修改路径时会迁移历史版本并重建 current，根目录中的其他文件不会移动。</p>
+
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-ghost btn-danger project-delete-entry" id="deleteProjectBtn" hidden>删除项目</button>
+      <span class="dialog-action-spacer"></span>
+      <button type="button" class="btn btn-ghost" id="projectCancelBtn">取消</button>
+      <button type="submit" class="btn btn-primary" id="projectSubmitBtn">创建项目</button>
+    </div>
+    <p class="dialog-error" id="projectError" hidden></p>
+  </form>
+</dialog>
+
+<dialog id="deleteProjectDialog" class="dialog">
+  <form id="deleteProjectForm" class="dialog-form">
+    <p class="dialog-kicker danger-text">Danger zone</p>
+    <h2>删除项目</h2>
+    <p class="dialog-copy">输入 <strong id="deleteProjectName"></strong> 确认。默认只从管理器移除，线上站点和版本文件仍会保留。</p>
+    <label>项目名称
+      <input type="text" name="confirmName" autocomplete="off" required>
+    </label>
+    <label class="checkbox-label danger-option">
+      <input type="checkbox" name="deleteFiles">
+      同时删除 current 联接点和全部版本文件
+    </label>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-ghost" id="deleteProjectCancelBtn">取消</button>
+      <button type="submit" class="btn btn-danger-solid" id="deleteProjectSubmitBtn" disabled>删除项目</button>
+    </div>
+    <p class="dialog-error" id="deleteProjectError" hidden></p>
+  </form>
+</dialog>
+
+<dialog id="cleanupDialog" class="dialog dialog-small">
+  <form id="cleanupForm" class="dialog-form">
+    <p class="dialog-kicker">Storage cleanup</p>
+    <h2>清理旧版本</h2>
+    <p class="dialog-copy">按时间保留最近的版本，当前线上版本始终不会被删除。</p>
+    <label>保留最近版本数
+      <input type="number" name="keep" min="0" step="1" value="5" required>
+    </label>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-ghost" id="cleanupCancelBtn">取消</button>
+      <button type="submit" class="btn btn-primary" id="cleanupSubmitBtn">开始清理</button>
+    </div>
+    <p class="dialog-error" id="cleanupError" hidden></p>
+  </form>
+</dialog>
+
+<dialog id="confirmDialog" class="dialog dialog-small">
+  <form method="dialog" class="dialog-form">
+    <p class="dialog-kicker" id="confirmKicker">Confirm action</p>
+    <h2 id="confirmTitle"></h2>
+    <p class="dialog-copy pre-line" id="confirmMessage"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-ghost" id="confirmCancelBtn">取消</button>
+      <button type="button" class="btn btn-primary" id="confirmSubmitBtn">确认</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
