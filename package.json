@@ -8,9 +8,10 @@
   },
   "license": "MIT",
   "dependencies": {
-    "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1",
     "adm-zip": "^0.5.10",
-    "fs-extra": "^11.2.0"
+    "express": "^4.19.2",
+    "fs-extra": "^11.2.0",
+    "multer": "^1.4.5-lts.1",
+    "ssh2": "^1.17.0"
   }
 }

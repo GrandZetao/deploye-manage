@@ -1,6 +1,9 @@
 const path = require('path');
 
 module.exports = {
+  // * SSH凭据和远程控制能力默认只允许本机访问；可信内网可显式设置 HOST。
+  host: process.env.HOST || '127.0.0.1',
+
   // 服务监听端口
   port: Number(process.env.PORT) || 3000,
 

@@ -1,0 +1,367 @@
+#
+# waterx-deploy.sh —— 类 Vercel 的不可变版本部署管理脚本
+# 每次部署生成一个独立、不可变的版本目录，通过软链接切换线上版本。
+# 一个脚本可管理多个系统：系统名作为第一个参数传入。
+#
+# 用法: ./waterx-deploy.sh <系统名> <command> [args]
+#      ./waterx-deploy.sh apps                查看所有已管理的系统
+#
+set -euo pipefail
+
+# ========== 配置区（按需修改） ==========
+BASE_DIR="/home/nginx/html"    # 所有系统的父目录（nginx 站点根）
+DEFAULT_KEEP=5
+# =======================================
+
+now_iso()   { date '+%Y-%m-%dT%H:%M:%S'; }
+now_human() { date '+%Y-%m-%d %H:%M:%S'; }
+gen_version() { date '+%Y%m%d-%H%M%S'; }
+
+current_version() {
+  if [ -L "$LIVE_LINK" ]; then
+    basename "$(readlink -f "$LIVE_LINK")"
+  fi
+}
+
+list_versions() {
+  find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
+}
+
+read_meta() {
+  local dir="$1"
+  local key="$2"
+  local file="${dir}/.release-info"
+  [ -f "$file" ] || { echo ""; return 0; }
+  if [ "$key" = "message" ]; then
+    awk '/^---MESSAGE---$/{f=1; next} f{print}' "$file"
+  else
+    grep "^${key}=" "$file" 2>/dev/null | head -1 | cut -d'=' -f2- || true
+  fi
+}
+
+switch_link() {
+  local target_dir="$1"
+  local tmp_link="${LIVE_LINK}.tmp.$$"
+  ln -sfn "$target_dir" "$tmp_link"
+  mv -T "$tmp_link" "$LIVE_LINK"
+}
+
+# ---------- init ----------
+cmd_init() {
+  if [ -L "$LIVE_LINK" ]; then
+    echo "检测到 $LIVE_LINK 已经是软链接，无需重复初始化。"
+    cmd_current
+    return 0
+  fi
+  if [ ! -e "$LIVE_LINK" ]; then
+    echo "错误：$LIVE_LINK 不存在，请检查路径配置。" >&2
+    exit 1
+  fi
+
+  local ver
+  ver=$(gen_version)
+  if [ -d "${RELEASES_DIR}/${ver}" ]; then
+    ver="${ver}-$$"
+  fi
+  local target_dir="${RELEASES_DIR}/${ver}"
+  mv "$LIVE_LINK" "$target_dir"
+  chmod -R a+rX "$target_dir" || true
+
+  {
+    echo "version=${ver}"
+    echo "time=$(now_human)"
+    echo "deployer=$(whoami)"
+    echo "size=$(du -sh "$target_dir" | cut -f1)"
+    echo "---MESSAGE---"
+    echo "初始化：自动归档迁移前的原有内容"
+  } > "${target_dir}/.release-info"
+
+  switch_link "$target_dir"
+  echo "$(now_iso) INIT ${ver}" >> "$LOG_FILE"
+  echo "初始化完成！"
+  echo "已将原有内容归档为版本 ${ver}，并建立软链接 ${LIVE_LINK} -> ${target_dir}"
+}
+
+# ---------- deploy ----------
+cmd_deploy() {
+  local zip_path="${1:-}"
+  local message="${2:-无说明}"
+
+  if [ -z "$zip_path" ] || [ ! -f "$zip_path" ]; then
+    echo "错误：请提供有效的 dist 压缩包路径" >&2
+    echo "用法：$0 deploy <dist.zip> \"本次更新说明\"" >&2
+    exit 1
+  fi
+  if [ ! -L "$LIVE_LINK" ]; then
+    echo "错误：尚未初始化，请先执行：$0 init" >&2
+    exit 1
+  fi
+  command -v unzip >/dev/null 2>&1 || { echo "错误：需要先安装 unzip" >&2; exit 1; }
+
+  local ver
+  ver=$(gen_version)
+  if [ -d "${RELEASES_DIR}/${ver}" ]; then
+    ver="${ver}-$$"
+  fi
+  local target_dir="${RELEASES_DIR}/${ver}"
+  mkdir -p "$target_dir"
+
+  local tmp_extract
+  tmp_extract=$(mktemp -d)
+  unzip -q "$zip_path" -d "$tmp_extract"
+
+  # 兼容压缩包里多包一层 dist/ 目录的情况
+  local src="$tmp_extract"
+  shopt -s nullglob
+  local entries=("$tmp_extract"/*)
+  shopt -u nullglob
+  if [ "${#entries[@]}" -eq 1 ] && [ -d "${entries[0]}" ]; then
+    src="${entries[0]}"
+  fi
+
+  cp -a "$src"/. "$target_dir"/
+  rm -rf "$tmp_extract"
+  chmod -R a+rX "$target_dir" || true
+
+  {
+    echo "version=${ver}"
+    echo "time=$(now_human)"
+    echo "deployer=$(whoami)"
+    echo "size=$(du -sh "$target_dir" | cut -f1)"
+    echo "---MESSAGE---"
+    echo "$message"
+  } > "${target_dir}/.release-info"
+
+  switch_link "$target_dir"
+  echo "$(now_iso) DEPLOY ${ver} ${message}" >> "$LOG_FILE"
+
+  echo "部署完成 ✅"
+  echo "版本号：${ver}"
+  echo "更新内容：${message}"
+}
+
+# ---------- list ----------
+cmd_list() {
+  local cur
+  cur=$(current_version)
+  local versions
+  versions=$(list_versions)
+  if [ -z "$versions" ]; then
+    echo "暂无任何版本。"
+    return 0
+  fi
+  echo "===================================================="
+  while IFS= read -r dir; do
+    local mark=""
+    [ "$dir" = "$cur" ] && mark="  【当前使用】"
+    echo "版本：${dir}${mark}"
+    echo "时间：$(read_meta "${RELEASES_DIR}/${dir}" time)"
+    echo "大小：$(read_meta "${RELEASES_DIR}/${dir}" size)"
+    echo "说明：$(read_meta "${RELEASES_DIR}/${dir}" message)"
+    echo "----------------------------------------------------"
+  done <<< "$versions"
+}
+
+# ---------- current ----------
+cmd_current() {
+  local cur
+  cur=$(current_version)
+  if [ -z "$cur" ]; then
+    echo "尚未初始化，请先执行：$0 init"
+    return 0
+  fi
+  echo "当前线上版本：${cur}"
+  echo "部署时间：$(read_meta "${RELEASES_DIR}/${cur}" time)"
+  echo "部署人：$(read_meta "${RELEASES_DIR}/${cur}" deployer)"
+  echo "更新内容：$(read_meta "${RELEASES_DIR}/${cur}" message)"
+}
+
+# ---------- switch ----------
+cmd_switch() {
+  local ver="${1:-}"
+  if [ -z "$ver" ]; then
+    echo "用法：$0 switch <版本号>" >&2
+    echo "可用版本：" >&2
+    list_versions >&2
+    exit 1
+  fi
+  local target_dir="${RELEASES_DIR}/${ver}"
+  if [ ! -d "$target_dir" ]; then
+    echo "错误：版本 ${ver} 不存在" >&2
+    exit 1
+  fi
+  switch_link "$target_dir"
+  echo "$(now_iso) SWITCH ${ver}" >> "$LOG_FILE"
+  echo "已切换到版本 ${ver}"
+  echo "说明：$(read_meta "$target_dir" message)"
+}
+
+# ---------- rollback ----------
+cmd_rollback() {
+  local cur
+  cur=$(current_version)
+  if [ -z "$cur" ]; then
+    echo "尚未初始化" >&2
+    exit 1
+  fi
+  local prev
+  prev=$(tac "$LOG_FILE" | awk -v cur="$cur" '$3 != cur && $3 != "" {print $3; exit}')
+  if [ -z "$prev" ]; then
+    echo "没有可回滚的历史版本记录"
+    exit 1
+  fi
+  if [ ! -d "${RELEASES_DIR}/${prev}" ]; then
+    echo "上一版本 ${prev} 已被清理，无法回滚"
+    exit 1
+  fi
+  echo "即将从 ${cur} 回滚到 ${prev} ..."
+  cmd_switch "$prev"
+}
+
+# ---------- clean ----------
+cmd_clean() {
+  local keep=$DEFAULT_KEEP
+  local yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --keep) keep="$2"; shift 2 ;;
+      --yes|-y) yes=1; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  local cur
+  cur=$(current_version)
+
+  mapfile -t all < <(list_versions)
+  local total=${#all[@]}
+  if [ "$total" -le "$keep" ]; then
+    echo "当前共有 ${total} 个版本，未超过保留数量 ${keep}，无需清理"
+    return 0
+  fi
+
+  local delete_count=$((total - keep))
+  local to_delete=("${all[@]:0:$delete_count}")
+
+  local final_delete=()
+  for v in "${to_delete[@]}"; do
+    [ "$v" = "$cur" ] && continue
+    final_delete+=("$v")
+  done
+
+  if [ ${#final_delete[@]} -eq 0 ]; then
+    echo "没有可清理的版本"
+    return 0
+  fi
+
+  echo "将删除以下 ${#final_delete[@]} 个版本（保留最新 ${keep} 个 + 当前使用版本）："
+  for v in "${final_delete[@]}"; do
+    echo "  - ${v}  ($(read_meta "${RELEASES_DIR}/${v}" message | head -1))"
+  done
+
+  if [ "$yes" -ne 1 ]; then
+    read -rp "确认删除？[y/N] " ans
+    case "$ans" in
+      y|Y) ;;
+      *) echo "已取消"; return 0 ;;
+    esac
+  fi
+
+  for v in "${final_delete[@]}"; do
+    rm -rf "${RELEASES_DIR:?}/${v}"
+    echo "$(now_iso) CLEAN ${v}" >> "$LOG_FILE"
+  done
+  echo "清理完成 ✅"
+}
+
+# ---------- usage ----------
+print_usage() {
+  cat <<EOF
+waterx-deploy —— 类 Vercel 的不可变版本部署工具（支持管理多个系统）
+
+用法：
+  $0 <系统名> <command> [参数...]
+  $0 apps                              查看当前已管理的所有系统
+
+命令：
+  init                              首次使用前初始化（把现有目录归档为第一个版本）
+  deploy <dist.zip> "更新说明"       部署新版本并自动切换上线
+  list                              查看所有历史版本
+  current                           查看当前线上版本详情
+  switch <版本号>                    切换到指定版本
+  rollback                          回滚到上一个版本
+  clean [--keep N] [--yes]          清理旧版本，默认保留最新 5 个
+
+示例（同一台服务器管理两个系统 waterx-micro 和 waterx-slw）：
+  $0 waterx-micro init
+  $0 waterx-micro deploy /root/dist.zip "修复登录页样式，新增导出功能"
+  $0 waterx-micro list
+  $0 waterx-micro rollback
+
+  $0 waterx-slw init
+  $0 waterx-slw deploy /root/dist2.zip "新增报表功能"
+  $0 waterx-slw switch 20260810-093011
+
+  $0 apps                              一次性查看所有系统当前的版本状态
+EOF
+}
+
+cmd_apps() {
+  local found=0
+  echo "已管理的系统列表："
+  for d in "${BASE_DIR}"/*-releases; do
+    [ -d "$d" ] || continue
+    found=1
+    local name
+    name=$(basename "$d")
+    name="${name%-releases}"
+    local link="${BASE_DIR}/${name}"
+    local cur=""
+    if [ -L "$link" ]; then
+      cur=$(basename "$(readlink -f "$link")")
+    fi
+    local count
+    count=$(find "$d" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    echo "  - ${name}   当前版本: ${cur:-未初始化}   共 ${count} 个历史版本"
+  done
+  [ "$found" -eq 1 ] || echo "  (暂无，请先用 $0 <系统名> init 初始化)"
+}
+
+# ---------- main ----------
+first="${1:-}"
+
+if [ -z "$first" ] || [ "$first" = "-h" ] || [ "$first" = "--help" ]; then
+  print_usage
+  exit 0
+fi
+
+if [ "$first" = "apps" ]; then
+  cmd_apps
+  exit 0
+fi
+
+APP_NAME="$first"
+shift
+
+LIVE_LINK="${BASE_DIR}/${APP_NAME}"                # nginx 实际访问的路径（会变成软链接）
+RELEASES_DIR="${BASE_DIR}/${APP_NAME}-releases"    # 该系统所有历史版本存放处
+LOG_FILE="${RELEASES_DIR}/.deploy.log"
+
+mkdir -p "$RELEASES_DIR"
+touch "$LOG_FILE"
+
+cmd="${1:-}"
+if [ $# -gt 0 ]; then
+  shift
+fi
+
+case "$cmd" in
+  init) cmd_init ;;
+  deploy) cmd_deploy "$@" ;;
+  list) cmd_list ;;
+  current) cmd_current ;;
+  switch) cmd_switch "$@" ;;
+  rollback) cmd_rollback ;;
+  clean) cmd_clean "$@" ;;
+  *) print_usage ;;
+esac

@@ -14,7 +14,10 @@
         <span class="brand-mark" aria-hidden="true">&#9670;</span>
         <div><strong>发布管理</strong><span>Deploy Manager</span></div>
       </div>
-      <button class="btn btn-sidebar" id="newProjectBtn">新建项目</button>
+      <div class="sidebar-actions">
+        <button class="btn btn-sidebar" id="newProjectBtn">新建项目</button>
+        <button class="btn btn-sidebar-secondary" id="serverManagerBtn">SSH 服务器</button>
+      </div>
     </div>
     <nav class="project-list" id="projectList" aria-label="项目列表"></nav>
     <p class="sidebar-note"><span></span>仅限可信网络访问</p>
@@ -34,6 +37,7 @@
           <div class="title-line">
             <h1 id="projectName"></h1>
             <span class="status-badge" id="projectStatus">尚未上线</span>
+            <span class="target-badge" id="projectTarget">Windows 本机</span>
           </div>
           <div class="path-line">
             <code id="projectPath"></code>
@@ -41,6 +45,8 @@
           </div>
         </div>
         <div class="header-actions">
+          <button class="btn btn-secondary" id="syncRemoteBtn" hidden>同步远程版本</button>
+          <button class="btn btn-secondary" id="operationsBtn">操作记录</button>
           <button class="btn btn-secondary" id="projectSettingsBtn">项目设置</button>
           <button class="btn btn-primary" id="deployBtn">部署新版本</button>
         </div>
@@ -50,6 +56,7 @@
         <div><span>当前线上版本</span><strong class="mono" id="activeVersion">—</strong></div>
         <div><span>版本总数</span><strong id="releaseCount">0</strong></div>
         <div><span>版本占用</span><strong id="releaseSize">0 B</strong></div>
+        <div><span>发布目标</span><strong id="targetSummary">Windows 本机</strong></div>
       </section>
 
       <div class="section-head">
@@ -69,6 +76,7 @@
     <p class="dialog-kicker">New release</p>
     <h2>部署新版本</h2>
     <p class="dialog-copy">上传静态构建产物，每次部署都会生成一个不可变版本。</p>
+    <p class="deploy-route-copy" id="deployTargetCopy"></p>
 
     <label>压缩包（.zip）
       <input type="file" name="file" accept=".zip" required>
@@ -82,6 +90,19 @@
       <input type="checkbox" name="activate" checked>
       部署完成后立即上线
     </label>
+
+    <label id="deployCredentialField" hidden><span id="deployCredentialLabel">SSH凭据</span>
+      <input type="password" name="credential" autocomplete="current-password">
+    </label>
+
+    <section class="deploy-progress" id="deployProgress" hidden aria-live="polite">
+      <div class="connection-rail" aria-hidden="true">
+        <span>Windows</span><i></i><span>SSH</span><i></i><span>Linux</span>
+      </div>
+      <div class="progress-head"><strong id="deployStage">准备中</strong><span id="deployPercent">0%</span></div>
+      <div class="progress-track"><span id="deployProgressBar"></span></div>
+      <p id="deployDetail">正在创建部署任务</p>
+    </section>
 
     <div class="dialog-actions">
       <button type="button" class="btn btn-ghost" id="deployCancelBtn">取消</button>
@@ -100,10 +121,31 @@
       <input type="text" name="name" placeholder="例如：company-website" required>
     </label>
 
-    <label>服务器目录（绝对路径）
+    <label>部署位置
+      <select name="targetType" id="projectTargetType">
+        <option value="local-windows">当前 Windows 电脑</option>
+        <option value="ssh-linux">远程 Linux 服务器</option>
+      </select>
+    </label>
+
+    <label id="projectServerField" hidden>SSH服务器
+      <select name="serverId" id="projectServerSelect"></select>
+    </label>
+
+    <label id="linuxLayoutField" hidden>Linux目录布局
+      <select name="linuxLayout" id="linuxLayoutSelect">
+        <option value="managed-current">项目目录 / current</option>
+        <option value="legacy-live-link">兼容旧脚本：站点软链接 + 相邻版本目录</option>
+      </select>
+    </label>
+
+    <label><span id="projectRootLabel">服务器目录（绝对路径）</span>
       <input type="text" name="rootPath" placeholder="D:\sites\company-website" required>
     </label>
-    <p class="hint">nginx 的 root 需要指向 <code>&lt;这个目录&gt;\current</code></p>
+    <label id="releaseRootField" hidden>历史版本目录
+      <input type="text" name="releaseRootPath" placeholder="/home/nginx/html/company-website-releases">
+    </label>
+    <p class="hint" id="projectRootHint">nginx 的 root 需要指向 <code>&lt;这个目录&gt;\current</code></p>
     <p class="notice" id="pathMigrationHint" hidden>修改路径时会迁移历史版本并重建 current，根目录中的其他文件不会移动。</p>
 
     <div class="dialog-actions">
@@ -128,12 +170,68 @@
       <input type="checkbox" name="deleteFiles">
       同时删除 current 联接点和全部版本文件
     </label>
+    <label id="deleteProjectCredentialField" hidden><span id="deleteProjectCredentialLabel">SSH凭据</span>
+      <input type="password" name="credential" autocomplete="current-password">
+    </label>
     <div class="dialog-actions">
       <button type="button" class="btn btn-ghost" id="deleteProjectCancelBtn">取消</button>
       <button type="submit" class="btn btn-danger-solid" id="deleteProjectSubmitBtn" disabled>删除项目</button>
     </div>
     <p class="dialog-error" id="deleteProjectError" hidden></p>
   </form>
+</dialog>
+
+<dialog id="serverDialog" class="dialog dialog-wide">
+  <div class="dialog-form">
+    <div class="dialog-title-row">
+      <div><p class="dialog-kicker">SSH connections</p><h2>Linux服务器</h2></div>
+      <button type="button" class="btn btn-ghost" id="serverCloseBtn">关闭</button>
+    </div>
+    <p class="dialog-copy">服务器连接可以被多个Linux项目复用，密码和私钥口令不会写入数据库。</p>
+    <div class="server-layout">
+      <section class="server-pane">
+        <button type="button" class="btn btn-secondary server-new" id="newServerBtn">新增连接</button>
+        <div class="server-list" id="serverList"></div>
+      </section>
+      <form id="serverForm" class="server-form">
+        <input type="hidden" name="serverId">
+        <label>服务器名称<input type="text" name="name" placeholder="例如：生产服务器" required></label>
+        <div class="field-row">
+          <label>地址<input type="text" name="host" placeholder="192.168.1.20" required></label>
+          <label class="port-field">端口<input type="number" name="port" min="1" max="65535" value="22" required></label>
+        </div>
+        <label>用户名<input type="text" name="username" placeholder="deploy" required></label>
+        <label>认证方式
+          <select name="authType" id="serverAuthType">
+            <option value="private-key">SSH私钥</option>
+            <option value="password">密码</option>
+          </select>
+        </label>
+        <label id="privateKeyField">Windows私钥路径<input type="text" name="privateKeyPath" placeholder="C:\Users\user\.ssh\id_ed25519"></label>
+        <label><span id="serverCredentialLabel">私钥口令（没有可留空）</span><input type="password" name="credential" autocomplete="current-password"></label>
+        <p class="server-session-status" id="serverSessionStatus">当前未连接 · 连接后凭据只保存在部署管理器进程内存中</p>
+        <p class="server-fingerprint" id="serverFingerprint">尚未确认主机指纹</p>
+        <pre class="server-test-result" id="serverTestResult" hidden></pre>
+        <div class="dialog-actions">
+          <button type="button" class="btn btn-ghost btn-danger" id="deleteServerBtn" hidden>删除连接</button>
+          <button type="button" class="btn btn-ghost" id="disconnectServerBtn" hidden>断开会话</button>
+          <span class="dialog-action-spacer"></span>
+          <button type="submit" class="btn btn-primary" id="serverSubmitBtn">保存并测试</button>
+        </div>
+        <p class="dialog-error" id="serverError" hidden></p>
+      </form>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="operationsDialog" class="dialog dialog-wide">
+  <div class="dialog-form">
+    <div class="dialog-title-row">
+      <div><p class="dialog-kicker">Operation history</p><h2>操作记录</h2></div>
+      <button type="button" class="btn btn-ghost" id="operationsCloseBtn">关闭</button>
+    </div>
+    <div class="operation-list" id="operationList"></div>
+  </div>
 </dialog>
 
 <dialog id="cleanupDialog" class="dialog dialog-small">
@@ -143,6 +241,9 @@
     <p class="dialog-copy">按时间保留最近的版本，当前线上版本始终不会被删除。</p>
     <label>保留最近版本数
       <input type="number" name="keep" min="0" step="1" value="5" required>
+    </label>
+    <label id="cleanupCredentialField" hidden><span id="cleanupCredentialLabel">SSH凭据</span>
+      <input type="password" name="credential" autocomplete="current-password">
     </label>
     <div class="dialog-actions">
       <button type="button" class="btn btn-ghost" id="cleanupCancelBtn">取消</button>
@@ -157,6 +258,9 @@
     <p class="dialog-kicker" id="confirmKicker">Confirm action</p>
     <h2 id="confirmTitle"></h2>
     <p class="dialog-copy pre-line" id="confirmMessage"></p>
+    <label id="confirmCredentialField" hidden><span id="confirmCredentialLabel">SSH凭据</span>
+      <input type="password" id="confirmCredential" autocomplete="current-password">
+    </label>
     <div class="dialog-actions">
       <button type="button" class="btn btn-ghost" id="confirmCancelBtn">取消</button>
       <button type="button" class="btn btn-primary" id="confirmSubmitBtn">确认</button>
