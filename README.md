@@ -8,6 +8,7 @@ Deploy Manager 是一个运行在 Windows 上的图形化部署工具，用于�
 
 - Windows 本机不可变版本部署和 NTFS junction 原子切换。
 - SSH 密码或私钥连接 Linux，SFTP 上传压缩包。
+- 每台服务器复用一条 SSH 物理连接和 SFTP 通道，避免频繁握手。
 - Linux 上传后校验 SHA-256，在 staging 目录解压成功后才生成正式版本。
 - 支持新项目的 `current` 布局，以及已有 Linux 部署脚本的站点软链接布局。
 - 同步服务器上已有的 Linux 历史版本，不要求重新部署。
@@ -106,6 +107,16 @@ $env:MAX_UPLOAD_MB = "500"
 npm start
 ```
 
+SSH连接池和SFTP上传参数也可以通过环境变量调整：
+
+```powershell
+$env:SSH_POOL_IDLE_MS = "300000" # 空闲5分钟后关闭物理连接
+$env:SSH_KEEPALIVE_MS = "15000"  # 每15秒发送SSH keepalive
+$env:SFTP_CONCURRENCY = "64"     # fastPut并发请求数，范围1–128
+$env:SFTP_CHUNK_KB = "128"       # 分块大小，范围32–1024KB
+npm start
+```
+
 ## Windows 项目使用方法
 
 1. 新建项目，选择 `Windows 本机`，填写项目名称和绝对部署目录。
@@ -148,9 +159,9 @@ unzip sha256sum find du ln mv stat awk cut basename tr
 1. 打开“SSH 服务器”。
 2. 填写地址、端口、用户名和认证方式。
 3. 点击“保存并测试”，首次连接时确认服务器主机指纹。
-4. 测试成功后，当前 Deploy Manager 进程会保存本次会话需要的凭据。
+4. 测试成功后，当前 Deploy Manager 进程会保存本次会话需要的凭据，并保留可复用的SSH连接。
 
-密码和私钥口令不会写入 `data/db.json`，只保存在当前 Node.js 进程内存中。服务重启或点击“断开连接”后需要重新输入一次；会话有效期间，部署、同步、诊断、文件浏览和日志读取不需要反复输入密码。
+密码和私钥口令不会写入 `data/db.json`，只保存在当前 Node.js 进程内存中。每台服务器默认维护一条物理SSH连接，远程命令和SFTP通过独立channel共享该连接；连续5分钟没有任务时物理连接会关闭，下次操作使用内存凭据自动重连。服务重启或点击“断开连接”后需要重新输入一次。
 
 ### 3. 新建 Linux 项目
 
@@ -290,7 +301,7 @@ https://example.com/
 
 - 可显示最近 100、200、500 或 1000 行。
 - 支持内容搜索、手动刷新、实时刷新和暂停。
-- 实时模式每 5 秒刷新，避免频繁建立 SSH 连接。
+- 实时模式每 5 秒刷新，并复用该服务器连接池中的SSH连接。
 - 单行最多读取 8KB。
 - access 日志按 HTTP 4xx/5xx 标记警告和错误。
 - error 日志识别 Nginx 的 warn/error/crit 等级。
